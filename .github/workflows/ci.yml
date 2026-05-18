@@ -55,9 +55,9 @@ jobs:
       matrix:
         include:
           - scheme: JomloCV Example iOS
-            destination: platform=iOS Simulator,name=iPhone 16 Pro
+            destination: generic/platform=iOS Simulator
           - scheme: JomloCV Example tvOS
-            destination: platform=tvOS Simulator,name=Apple TV
+            destination: generic/platform=tvOS Simulator
 
     steps:
       - name: Checkout
