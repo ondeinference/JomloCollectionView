@@ -1,0 +1,155 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release
+    runs-on: macos-15
+
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          VERSION="${TAG#v}"
+          PODSPEC_VERSION="$(ruby -e "content = File.read('JomloCollectionView.podspec'); puts content[/s\\.version\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"]/, 1]")"
+
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$TAG" ]; then
+            echo "Release tags must use the vMAJOR.MINOR.PATCH format, for example v1.0.0." >&2
+            exit 1
+          fi
+
+          if [ "$VERSION" != "$PODSPEC_VERSION" ]; then
+            echo "Tag version $VERSION does not match podspec version $PODSPEC_VERSION." >&2
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Build package
+        run: |
+          xcodebuild \
+            -scheme JomloCollectionView \
+            -destination "platform=iOS Simulator,name=iPhone 16 Pro" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Test package
+        run: |
+          xcodebuild \
+            -scheme JomloCollectionView \
+            -destination "platform=iOS Simulator,name=iPhone 16 Pro" \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+
+      - name: Build iOS example
+        run: |
+          xcodebuild \
+            -project Example/JomloCollectionViewExample.xcodeproj \
+            -scheme "JomloCV Example iOS" \
+            -destination "platform=iOS Simulator,name=iPhone 16 Pro" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Build tvOS example
+        run: |
+          xcodebuild \
+            -project Example/JomloCollectionViewExample.xcodeproj \
+            -scheme "JomloCV Example tvOS" \
+            -destination "platform=tvOS Simulator,name=Apple TV" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Lint podspec
+        run: |
+          pod lib lint JomloCollectionView.podspec \
+            --allow-warnings \
+            --platforms=ios,tvos \
+            --skip-import-validation
+
+  github-release:
+    name: GitHub release
+    runs-on: ubuntu-latest
+    needs: validate
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate.outputs.tag }}
+          name: JomloCollectionView ${{ needs.validate.outputs.version }}
+          generate_release_notes: true
+
+  cocoapods:
+    name: CocoaPods publish
+    runs-on: macos-15
+    needs:
+      - validate
+      - github-release
+    env:
+      COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+
+      - name: Skip without trunk token
+        if: ${{ env.COCOAPODS_TRUNK_TOKEN == '' }}
+        run: echo "COCOAPODS_TRUNK_TOKEN is not configured; skipping CocoaPods publish."
+
+      - name: Publish pod
+        if: ${{ env.COCOAPODS_TRUNK_TOKEN != '' }}
+        run: |
+          pod trunk push JomloCollectionView.podspec \
+            --allow-warnings \
+            --skip-import-validation
